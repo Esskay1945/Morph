@@ -1,6 +1,6 @@
 # Morph
 
-A single-file, browser-only file converter and toolkit. No server, no upload, no accounts — every conversion, edit, and tool runs on your device using WebAssembly and native browser APIs. Open `morph.html` in any modern browser and it just works.
+A single-file, browser-only file converter and toolkit. No server, no upload, no accounts — every conversion, edit, and tool runs on your device using WebAssembly and native browser APIs. Open `morrph.netlify.app` in any modern browser and it just works.
 
 ---
 
