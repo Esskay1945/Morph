@@ -816,7 +816,7 @@ var MediaConverter = (function(){
     else { text.textContent='Engine idle'; }
   }
 
-  function ensureLoaded(onProgress){
+  function ensureLoaded(){
     if (loaded) return Promise.resolve();
     if (loadingPromise) return loadingPromise;
     setEngineUI('loading',0);
@@ -825,11 +825,6 @@ var MediaConverter = (function(){
       .then(function(){
         var FFmpeg = window.FFmpegWASM.FFmpeg;
         ffmpeg = new FFmpeg();
-        ffmpeg.on('progress', function(e){
-          var pct = Math.max(0, Math.min(100, Math.round((e.progress||0)*100)));
-          setEngineUI('loading', pct);
-          if (onProgress) onProgress(pct);
-        });
         // A blob URL lets the browser start the module worker from this origin.
         // Its absolute import keeps the worker's own relative imports on the CDN.
         var workerModule = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/worker.js';
@@ -849,13 +844,21 @@ var MediaConverter = (function(){
     return loadingPromise;
   }
 
+  function execWithProgress(args, onProgress){
+    function report(e){
+      if (onProgress) onProgress(Math.max(0, Math.min(100, Math.round((e.progress||0)*100))));
+    }
+    ffmpeg.on('progress', report);
+    return ffmpeg.exec(args).finally(function(){ ffmpeg.off('progress', report); });
+  }
+
   function run(input, sourceFmt, targetFmt, buildArgs, onProgress){
-    return ensureLoaded(onProgress).then(function(){
+    return ensureLoaded().then(function(){
       var fetchFile = window.FFmpegUtil.fetchFile;
       var inName = 'in_'+Date.now()+Math.random().toString(36).slice(2)+'.'+sourceFmt;
       var outName = 'out_'+Date.now()+Math.random().toString(36).slice(2)+'.'+targetFmt;
       return fetchFile(input).then(function(data){ return ffmpeg.writeFile(inName, data); })
-        .then(function(){ return ffmpeg.exec(buildArgs(inName, outName)); })
+        .then(function(){ return execWithProgress(buildArgs(inName, outName), onProgress); })
         .then(function(code){
           if (code !== 0) throw new Error('FFmpeg could not convert this file (exit code '+code+').');
           return ffmpeg.readFile(outName);
@@ -909,7 +912,7 @@ var MediaConverter = (function(){
   }
 
   function mergeAudio(files, targetFmt, onProgress){
-    return ensureLoaded(onProgress).then(function(){
+    return ensureLoaded().then(function(){
       var fetchFile = window.FFmpegUtil.fetchFile;
       var names = [];
       return files.reduce(function(p, f, idx){
@@ -928,7 +931,7 @@ var MediaConverter = (function(){
                         : targetFmt==='wav' ? ['-c:a','pcm_s16le']
                         : ['-c:a','aac','-b:a','192k'];
         var args = inputArgs.concat(['-filter_complex', filter, '-map', '[out]']).concat(codecArgs).concat([outName]);
-        return ffmpeg.exec(args).then(function(){ return ffmpeg.readFile(outName); }).then(function(data){
+        return execWithProgress(args, onProgress).then(function(){ return ffmpeg.readFile(outName); }).then(function(data){
           names.forEach(function(n){ ffmpeg.deleteFile(n).catch(function(){}); });
           ffmpeg.deleteFile(outName).catch(function(){});
           return new Blob([data.buffer], {type: MIME_MAP[targetFmt]||'application/octet-stream'});
