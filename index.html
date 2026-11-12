@@ -388,7 +388,7 @@ function targetsFor(ext, category){
 /* ---------------- utils ---------------- */
 function formatBytes(n){ if(n<1024) return n+' B'; if(n<1024*1024) return (n/1024).toFixed(1)+' KB'; return (n/1024/1024).toFixed(2)+' MB'; }
 function escapeXml(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&apos;'); }
-function escapeHtml(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escapeHtml(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function blobToDataURL(blob){ return new Promise(function(resolve,reject){ var r=new FileReader(); r.onload=function(){resolve(r.result);}; r.onerror=reject; r.readAsDataURL(blob); }); }
 function sanitizeTag(s){ var t=String(s||'field').trim().replace(/[^a-zA-Z0-9_]/g,'_'); if(!t)t='field'; if(/^[0-9]/.test(t))t='_'+t; return t; }
 function baseName(name){ var i=name.lastIndexOf('.'); return i>0?name.slice(0,i):name; }
@@ -404,7 +404,12 @@ function loadScriptOnce(src){
   if (loadedScripts[src]) return loadedScripts[src];
   loadedScripts[src] = new Promise(function(resolve,reject){
     var s=document.createElement('script'); s.src=src;
-    s.onload=function(){resolve();}; s.onerror=function(){reject(new Error('Failed to load '+src));};
+    s.onload=function(){resolve();};
+    s.onerror=function(){
+      delete loadedScripts[src];
+      s.remove();
+      reject(new Error('Failed to load '+src));
+    };
     document.head.appendChild(s);
   });
   return loadedScripts[src];
@@ -490,7 +495,7 @@ function extractDOCX(file){
 function extractDOC(){ return Promise.reject(new Error('Legacy .doc files can\'t be parsed in-browser — save as .docx in Word and re-upload.')); }
 function extractPDF(file){
   return file.arrayBuffer().then(function(buf){
-    return window.pdfjsLib.getDocument({data:buf}).promise.then(function(pdf){
+    return window.pdfjsLib.getDocument({data:buf, isEvalSupported:false}).promise.then(function(pdf){
       var pagePromises=[];
       for (var i=1;i<=pdf.numPages;i++){
         pagePromises.push(pdf.getPage(i).then(function(page){
@@ -747,7 +752,7 @@ var RASTER_MIME = { jpg:'image/jpeg', png:'image/png', webp:'image/webp' };
 async function pdfToImages(file, targetFmt, onProgress){
   ensurePdfWorker();
   var buf = await file.arrayBuffer();
-  var pdf = await window.pdfjsLib.getDocument({data:buf}).promise;
+  var pdf = await window.pdfjsLib.getDocument({data:buf, isEvalSupported:false}).promise;
   var blobs = [];
   for (var i=1;i<=pdf.numPages;i++){
     var page = await pdf.getPage(i);
@@ -819,21 +824,28 @@ var MediaConverter = (function(){
       .then(function(){ return loadScriptOnce('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js'); })
       .then(function(){
         var FFmpeg = window.FFmpegWASM.FFmpeg;
-        var toBlobURL = window.FFmpegUtil.toBlobURL;
         ffmpeg = new FFmpeg();
         ffmpeg.on('progress', function(e){
           var pct = Math.max(0, Math.min(100, Math.round((e.progress||0)*100)));
           setEngineUI('loading', pct);
           if (onProgress) onProgress(pct);
         });
-        var baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd';
-        return Promise.all([
-          toBlobURL(baseURL+'/ffmpeg-core.js','text/javascript'),
-          toBlobURL(baseURL+'/ffmpeg-core.wasm','application/wasm')
-        ]).then(function(urls){ return ffmpeg.load({coreURL:urls[0], wasmURL:urls[1]}); });
+        // A blob URL lets the browser start the module worker from this origin.
+        // Its absolute import keeps the worker's own relative imports on the CDN.
+        var workerModule = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/worker.js';
+        var workerSource = 'import '+JSON.stringify(workerModule)+';';
+        var workerURL = URL.createObjectURL(new Blob([workerSource], {type:'text/javascript'}));
+        var coreURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm/ffmpeg-core.js';
+        var timeout = AbortSignal.timeout(120000);
+        return ffmpeg.load({classWorkerURL:workerURL, coreURL:coreURL}, {signal:timeout})
+          .finally(function(){ URL.revokeObjectURL(workerURL); });
       })
       .then(function(){ loaded=true; setEngineUI('ready'); })
-      .catch(function(err){ loadingPromise=null; setEngineUI('idle'); throw err; });
+      .catch(function(err){
+        if (ffmpeg) ffmpeg.terminate();
+        ffmpeg=null; loadingPromise=null; setEngineUI('idle');
+        throw err;
+      });
     return loadingPromise;
   }
 
@@ -844,11 +856,17 @@ var MediaConverter = (function(){
       var outName = 'out_'+Date.now()+Math.random().toString(36).slice(2)+'.'+targetFmt;
       return fetchFile(input).then(function(data){ return ffmpeg.writeFile(inName, data); })
         .then(function(){ return ffmpeg.exec(buildArgs(inName, outName)); })
-        .then(function(){ return ffmpeg.readFile(outName); })
+        .then(function(code){
+          if (code !== 0) throw new Error('FFmpeg could not convert this file (exit code '+code+').');
+          return ffmpeg.readFile(outName);
+        })
         .then(function(data){
-          ffmpeg.deleteFile(inName).catch(function(){});
-          ffmpeg.deleteFile(outName).catch(function(){});
-          return new Blob([data.buffer], {type: MIME_MAP[targetFmt]||'application/octet-stream'});
+          return new Blob([data], {type: MIME_MAP[targetFmt]||'application/octet-stream'});
+        })
+        .finally(function(){
+          return Promise.all([inName, outName].map(function(name){
+            return ffmpeg.deleteFile(name).catch(function(){});
+          }));
         });
     });
   }
@@ -968,7 +986,10 @@ function svgToRaster(file, targetFmt){
 }
 var ImgConverter = {
   convert: function(file, sourceFmt, targetFmt, onProgress){
-    if (sourceFmt===targetFmt) return rasterConvert(file, targetFmt);
+    if (sourceFmt===targetFmt){
+      if (targetFmt==='svg' || targetFmt==='gif') return Promise.resolve(file.slice(0, file.size, MIME_MAP[targetFmt]));
+      return rasterConvert(file, targetFmt);
+    }
     if (sourceFmt==='gif' && targetFmt==='svg') return MediaConverter.imageConvert(file,'gif','png',onProgress).then(rasterToSvg);
     if (sourceFmt==='svg' && targetFmt==='gif') return svgToRaster(file,'png').then(function(png){ return MediaConverter.imageConvert(png,'png','gif',onProgress); });
     if (sourceFmt==='gif' || targetFmt==='gif') return MediaConverter.imageConvert(file, sourceFmt, targetFmt, onProgress);
@@ -1181,7 +1202,7 @@ function setCvFile(file){
   document.getElementById('cvDropzone').style.display='none';
   var card=document.getElementById('cvFileCard');
   card.style.display='flex'; card.className='file-card';
-  card.innerHTML = '<div class="file-icon">'+cv.ext.toUpperCase().slice(0,4)+'</div>'+
+  card.innerHTML = '<div class="file-icon">'+escapeHtml(cv.ext.toUpperCase().slice(0,4))+'</div>'+
     '<div class="file-meta"><div class="file-name">'+escapeHtml(file.name)+'</div>'+
     '<div class="file-sub">'+formatBytes(file.size)+(cv.category?' · '+cv.category.toUpperCase():' · unsupported')+'</div></div>'+
     '<button class="btn sm" id="cvChangeBtn">Change</button>';
@@ -1758,7 +1779,7 @@ function renderBatchPanel(){
     batchQueue=[]; renderBatchQueue();
   });
   document.getElementById('bqConvertAll').addEventListener('click', function(){
-    batchQueue.filter(function(it){ return it.category && it.status!=='working'; }).forEach(function(it){ queueBatchConvert(it); });
+    batchQueue.forEach(queueBatchConvert);
   });
   document.getElementById('bqZip').addEventListener('click', function(){
     var done = batchQueue.filter(function(it){ return it.status==='done'; });
@@ -1788,34 +1809,41 @@ function removeBatchItem(id){
   batchQueue = batchQueue.filter(function(q){return q.id!==id;});
   renderBatchQueue();
 }
-function convertBatchItem(item){
-  if (!item.category || !item.targetFmt) return Promise.reject(new Error('no target'));
+async function convertBatchItem(item){
+  if (!batchQueue.includes(item)) return;
   item.status='working'; item.statusText='Converting…'; renderBatchQueue();
   var onProgress=function(pct){ item.statusText='Converting… '+pct+'%'; renderBatchQueue(); };
-  var task;
-  if (item.category==='doc'){
-    if (item.sourceFmt==='pdf' && (item.targetFmt==='jpg'||item.targetFmt==='png')){
-      task = pdfToImages(item.file, item.targetFmt, onProgress).then(function(r){ return r.blob; });
+  var target = item.targetFmt;
+  try {
+    var blob, ext = target;
+    if (item.sourceFmt==='pdf' && (target==='jpg'||target==='png')){
+      var result = await pdfToImages(item.file, target, onProgress);
+      blob = result.blob;
+      ext = result.ext;
+    } else if (item.category==='doc'){
+      var model = await DocConverter.extract[item.sourceFmt](item.file);
+      blob = await DocConverter.generate[target](model);
+    } else if (item.category==='img'){
+      blob = await ImgConverter.convert(item.file, item.sourceFmt, target, onProgress);
     } else {
-      task = DocConverter.extract[item.sourceFmt](item.file).then(function(model){ return DocConverter.generate[item.targetFmt](model); });
+      blob = await MediaConverter.convertAV(item.file, item.sourceFmt, target, {}, onProgress);
     }
-  } else if (item.category==='img'){
-    task = ImgConverter.convert(item.file, item.sourceFmt, item.targetFmt, onProgress);
-  } else {
-    task = MediaConverter.convertAV(item.file, item.sourceFmt, item.targetFmt, {}, onProgress);
-  }
-  return task.then(function(blob){
+    if (!batchQueue.includes(item)) return;
     item.status='done'; item.statusText='Done — '+formatBytes(blob.size);
     if (item.resultUrl) URL.revokeObjectURL(item.resultUrl);
     item.resultBlob=blob; item.resultUrl=URL.createObjectURL(blob);
-    item.resultName = baseName(item.name)+'.'+item.targetFmt;
-    logHistory({name:item.name, action:item.sourceFmt.toUpperCase()+' → '+item.targetFmt.toUpperCase(), size:blob.size});
-    renderBatchQueue();
-  }).catch(function(err){
-    item.status='error'; item.statusText='Failed: '+(err&&err.message?err.message:'error'); renderBatchQueue();
-  });
+    item.resultName = baseName(item.name)+(ext==='zip'?'-pages':'')+'.'+ext;
+    logHistory({name:item.name, action:item.sourceFmt.toUpperCase()+' → '+ext.toUpperCase(), size:blob.size});
+  } catch(err){
+    item.status='error'; item.statusText='Failed: '+(err&&err.message?err.message:'error');
+  }
+  renderBatchQueue();
 }
-function queueBatchConvert(item){ batchConvertChain = batchConvertChain.then(function(){ return convertBatchItem(item); }); return batchConvertChain; }
+function queueBatchConvert(item){
+  if (!item.targetFmt || item.status==='queued' || item.status==='working') return;
+  item.status='queued'; item.statusText='Queued'; renderBatchQueue();
+  batchConvertChain = batchConvertChain.then(function(){ return convertBatchItem(item); });
+}
 
 function renderBatchQueue(){
   var listEl=document.getElementById('bqQueue'), emptyEl=document.getElementById('bqEmpty');
@@ -1828,15 +1856,16 @@ function renderBatchQueue(){
     }
     var targets = targetsFor(it.sourceFmt, it.category).filter(function(t){return t!==it.sourceFmt;});
     var options = targets.map(function(t){ return '<option value="'+t+'"'+(t===it.targetFmt?' selected':'')+'>'+t.toUpperCase()+'</option>'; }).join('');
-    var sigClass = it.status==='working'?'converting':it.status==='done'?'done':it.status==='error'?'error':'';
+    var busy = it.status==='queued' || it.status==='working';
+    var sigClass = busy?'converting':it.status==='done'?'done':it.status==='error'?'error':'';
     var statusClass = it.status==='done'?'ok':it.status==='error'?'err':'';
     var dlBtn = it.status==='done' ? '<a class="mini-icon" href="'+it.resultUrl+'" download="'+escapeHtml(it.resultName)+'" title="Download">&#8595;</a>' : '<button class="mini-icon" disabled>&#8595;</button>';
     return '<div class="card qrow">'+
       '<div class="row-info"><div class="row-name">'+escapeHtml(it.name)+'</div><div class="row-meta">'+formatBytes(it.size)+'</div></div>'+
       '<div class="route"><span class="fmt-node">'+it.sourceFmt.toUpperCase()+'</span><div class="signal '+sigClass+'"><div class="dot"></div></div>'+
-      '<select class="target-sm" data-target="'+it.id+'">'+options+'</select></div>'+
+      '<select class="target-sm" data-target="'+it.id+'"'+(busy?' disabled':'')+'>'+options+'</select></div>'+
       '<div class="qstatus '+statusClass+'">'+escapeHtml(it.statusText)+'</div>'+
-      '<div class="qactions"><button class="mini-icon" data-convert="'+it.id+'" title="Convert">&#9654;</button>'+dlBtn+'<button class="mini-icon" data-rm="'+it.id+'" title="Remove">&#10005;</button></div>'+
+      '<div class="qactions"><button class="mini-icon" data-convert="'+it.id+'" title="Convert"'+(busy?' disabled':'')+'>&#9654;</button>'+dlBtn+'<button class="mini-icon" data-rm="'+it.id+'" title="Remove">&#10005;</button></div>'+
     '</div>';
   }).join('');
   Array.prototype.forEach.call(listEl.querySelectorAll('[data-rm]'), function(b){ b.addEventListener('click', function(){ removeBatchItem(parseInt(b.getAttribute('data-rm'),10)); }); });
@@ -1873,13 +1902,15 @@ function switchPanel(name){
 }
 function applyTheme(t){
   document.documentElement.setAttribute('data-theme', t);
-  localStorage.setItem('morph_theme', t);
+  try { localStorage.setItem('morph_theme', t); } catch(e){}
   document.getElementById('themeIcon').innerHTML = t==='light'
     ? '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>'
     : '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>';
 }
 function init(){
-  applyTheme(localStorage.getItem('morph_theme') || 'dark');
+  var theme = 'dark';
+  try { theme = localStorage.getItem('morph_theme') || theme; } catch(e){}
+  applyTheme(theme);
   document.getElementById('themeToggle').addEventListener('click', function(){
     applyTheme(document.documentElement.getAttribute('data-theme')==='light' ? 'dark' : 'light');
   });
@@ -1892,7 +1923,6 @@ function init(){
   renderBatchPanel();
   renderHistory();
   ensurePdfWorker();
-  if (!window.pdfjsLib){ var chk=setInterval(function(){ if(window.pdfjsLib){ ensurePdfWorker(); clearInterval(chk); } }, 200); }
 }
 document.addEventListener('DOMContentLoaded', init);
 })();
