@@ -1,6 +1,6 @@
 # Morph
 
-A single-file, browser-only file converter and toolkit. No server, no upload, no accounts — every conversion, edit, and tool runs on your device using WebAssembly and native browser APIs. Open `morrph.netlify.app` in any modern browser and it just works.
+A single-file, browser-only file converter and toolkit. No server, no upload, no accounts — every conversion, edit, and tool runs on your device using WebAssembly and native browser APIs. Open [Morph on Netlify](https://morrph.netlify.app) in a modern browser.
 
 ---
 
@@ -25,9 +25,9 @@ A single-file, browser-only file converter and toolkit. No server, no upload, no
 
 ## Quick start
 
-1. Download `morph.html`.
-2. Open it in Chrome, Edge, Firefox, or Safari (double-click, or drag it into a browser tab).
-3. That's it — no install, no build step, no dependencies to set up locally. Everything it needs loads from a CDN on first use.
+1. Download `index.html`.
+2. Serve the folder locally with `python -m http.server 8000` and open `http://localhost:8000`.
+3. No build step is needed. The browser downloads the conversion libraries from a CDN.
 
 You can also drop it in any static file host (GitHub Pages, Netlify, S3, etc.) if you want a shareable URL — it's a single HTML file with no backend.
 
@@ -152,7 +152,7 @@ Works in current versions of Chrome, Edge, Firefox, and Safari. Requires a brows
 ## File structure
 
 ```
-morph.html   ← everything: markup, styles, and logic in one file
+index.html   ← everything: markup, styles, and logic in one file
 ```
 
 There is nothing else to install or configure.
